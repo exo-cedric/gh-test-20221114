@@ -1,0 +1,55 @@
+---
+# REF: https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions
+name: On Comment Workflow
+
+on:
+  issue_comment:  # NB: this also includes PR comments
+    types:
+      - created
+
+jobs:
+  reformat-edn:
+    name: Reformat EDN files
+    if: ${{ github.event.issue.pull_request && github.event.comment.body == '/format_edn'}}
+    runs-on: ubuntu-latest
+    steps:
+    # - id: debug_context
+    #   run: |
+    #     echo '${{ toJSON(github) }}'
+    - id: pull_request
+      # NB: We must retrieve the Pull-Request details (SHA/Refs) from the API
+      # REF: https://github.com/octokit/request-action
+      uses: octokit/request-action@v2.x
+      with:
+        route: GET /repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    # - id: debug_pull_request
+    #   run: |
+    #     echo '${{ steps.pull_request.outputs.data }}'
+    - id: checkout
+      # REF: https://github.com/actions/checkout
+      uses: actions/checkout@v3
+      with:
+        ref: ${{ fromJson(steps.pull_request.outputs.data).head.sha }}
+        fetch-depth: 0
+        set-safe-directory: /github/workspace
+    - id: modified_edn_files
+      run: |
+        git diff --name-only --diff-filter=ACMRT \
+          ${{ fromJson(steps.pull_request.outputs.data).base.sha }} \
+          ${{ fromJson(steps.pull_request.outputs.data).head.sha }} \
+        | grep '\.edn$' \
+        | tee ./modified-edn-files
+    - id: format_edn_apply
+      uses: docker://exoscale/kargo:latest
+      with:
+        entrypoint: /usr/bin/xargs
+        args: -r -a ./modified-edn-files ./zprint-this -fw
+    - id: commit_push
+      run: |
+        rm -f ./modified-edn-files
+        git config --global user.name 'Exoscale Ops'
+        git config --global user.email 'ops@exoscale.ch'
+        git commit -m '[GitHub Action] Reformatted EDN files' -a || exit 0
+        git push origin HEAD:${{ fromJson(steps.pull_request.outputs.data).head.ref }}

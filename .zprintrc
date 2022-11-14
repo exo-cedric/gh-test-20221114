@@ -1,0 +1,19 @@
+{:style  :respect-bl
+ :width  120
+ :list   {:wrap?             true
+          :wrap-coll?        false
+          :wrap-multi?       false
+          :wrap-after-multi? true}
+ :map    {:sort?     false
+          :comma?    false
+          :force-nl? true
+          :justify?  true
+          :justify   {:max-variance 120}}
+ :set    {:sort?             false
+          :wrap?             true
+          :wrap-coll?        false
+          :wrap-after-multi? true}
+ :vector {:wrap?             true
+          :wrap-coll?        false
+          :wrap-multi?       false
+          :wrap-after-multi? true}}

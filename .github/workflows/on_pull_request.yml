@@ -1,0 +1,34 @@
+---
+# REF: https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions
+name: On Pull-Request Workflow
+
+on:
+  pull_request:  # NB: this also includes PR pushes
+
+jobs:
+  validate-edn:
+    name: Validate EDN files format
+    runs-on: ubuntu-latest
+    steps:
+    - id: checkout
+      # REF: https://github.com/actions/checkout
+      uses: actions/checkout@v3
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        fetch-depth: 0
+    - id: modified_edn_files
+      run: |
+        git diff --name-only --diff-filter=ACMRT \
+          ${{ github.event.pull_request.base.sha }} \
+          ${{ github.event.pull_request.head.sha }} \
+        | grep '\.edn$' \
+        | tee ./modified-edn-files
+    - id: format_edn_verify
+      uses: docker://exoscale/kargo:latest
+      with:
+        entrypoint: /usr/bin/xargs
+        args: -r -a ./modified-edn-files ./zprint-this -fc
+    - id: error_message
+      if: failure()
+      run: |
+        echo '::error::Use the /format_edn command in a comment to trigger automatic reformatting'

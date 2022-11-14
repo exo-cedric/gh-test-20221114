@@ -1,0 +1,12 @@
+{:bundles
+   {:kafka-rest
+      {:destination {:namespace "infra"},
+       :enabled
+         #cluster
+          {:default false, :kube-gva2-preprod-2 true, :kube-gva2-prod-2 true},
+       :middleware [[:global/labels {:app.exoscale.net/owner "vultures"}]],
+       :source {:path "applications/kafka-rest",
+                :repo-url "https://github.com/exoscale/kubernetes-config",
+                :target-revision "master"},
+       :tool :kargo,
+       :type :application}}}

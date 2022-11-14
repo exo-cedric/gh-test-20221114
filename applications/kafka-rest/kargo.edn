@@ -1,0 +1,141 @@
+{:name "kafka-rest"
+
+ :variables {;; Workload
+             :appname                  #or [#env ARGOCD_APP_NAME "kafka-rest"]
+             :namespace                #or [#env ARGOCD_APP_NAMESPACE "infra"]
+
+             ;; Labels
+             :global-labels            {"app.exoscale.net/owner" "vultures"}
+
+             ;; Image
+             ;; REF: https://github.com/exoscale/dockerfiles/tree/master/kafkarest
+             :image                    {:registry    #env REGISTRY
+                                        :name        "exoscale/kafkarest"
+                                        :tag         #environment
+                                                      {:prod    "7.1"
+                                                       :default "7.1"}
+                                        :pull-policy :always}  ; pull 7.1.x patch release when available
+
+             ;; Resources
+             :resources                {:cpu    [0.1 1.0]
+                                        :memory ["256Mi" "512Mi"]}
+
+             ;; Ingress
+             ;; ACL: Keep at least infra-bastion for internal testing purposes
+             :allowed-clients          ["infra-bastion.*\\.p\\.exoscale\\.net"]
+
+             ;; Kafka
+             :bootstrap-servers        "kafka-infra-messaging.service.consul.exoscale.net:9094"
+
+             ;; TLS <-> Java Keystore (JKS)
+             ;; (mTLS)
+             :client-security-protocol "SSL"}
+ ;;:client-cas -> see "tls-client-cas.pem" below
+
+ :bundles
+   {:jks-password {:type       :secret
+                   :middleware [[:secret/annotate "exoscale.net/description"
+                                 "Some not-so-important password for that stupid JKS"]]
+                   :data       {"password.txt" #base64 "AinsiFontFontFontLesPetitesMarionnettes"}}
+
+    :tls-client-cert
+      {:type :certificate
+       :secret-name #join [#lookup :appname "-tls-client-cert-secret"]
+       :issuer-ref {:name  "vault-issuer-kube-pod"
+                    :kind  "ClusterIssuer"
+                    :group "cert-manager.io"}
+       :common-name
+         #envf [#join [#lookup :appname "." #lookup :namespace "-%s.pod"] ENVIRONMENT]
+       :usages [:client-auth]
+       :keystores
+         {:JKS-keystore
+            {:create              true
+             :password-secret-ref {:name #join [#lookup :appname "-jks-password-secret"]
+                                   :key  "password.txt"}}}}
+
+    :main
+      {:type :auth-http-service
+       :replicas #environment
+                  {:prod    2
+                   :default 1}
+
+       :subdomain #lookup :appname
+       :zone :global
+       :environment #env ENVIRONMENT
+       :port ["http" 8082]
+
+       ;; auth-proxy: mTLS-only (toolbox/logbook and the likes don't support OIDC)
+       :auth-group "no-oidc"
+       :allowed-clients #lookup :allowed-clients
+
+       :middleware
+         [[:global/labels #lookup :global-labels]
+          [:ingress/annotate "traefik.ingress.kubernetes.io/router.tls.options" "mtls@file"]
+          [:pod/run-as-user 200]
+          [:pod/annotate "secret.reloader.stakater.com/reload" #join [#lookup :appname "-tls-client-cert-secret"]]]
+
+       :config ; -> /config/... (#lookup <-> populated from Consul)
+         {"tls-client-cas.pem" #lookup "ca-certificates/exoscale/bundles/local/infra-messaging"}
+
+       :volumes
+         {"jks-password"    {:type   :secret
+                             :secret #join [#lookup :appname "-jks-password-secret"]}
+          "tls-client-cert" {:type   :secret
+                             :secret #join [#lookup :appname "-tls-client-cert-secret"]}
+          "etc-kafka-rest"  {:type       :empty-dir
+                             :size-limit "1M"}}
+
+       :container
+         {:name #lookup :appname
+          :image #lookup :image
+          :resources #lookup :resources
+
+          ;; REF: https://github.com/confluentinc/kafka-rest/blob/master/bin/kafka-rest-run-class
+          ;; REF: https://github.com/exoscale/dockerfiles/blob/master/kafkarest/kafka-rest.properties.in
+          ;; REF: https://github.com/exoscale/dockerfiles/blob/master/kafkarest/log4j.properties.in
+          :env
+            {;; Runtime
+             :TMPDIR "/etc/kafka-rest" ; <-> mktemp (jks-* utils)
+             :KAFKAREST_HEAP_OPTS "-Xmx256M"
+             ;; Kafka
+             :KAFKA_REST_CLIENT_ID
+               #envf [#join [#lookup :appname "-%s-%s"] LOCATION ENVIRONMENT]
+             :KAFKA_REST_BOOTSTRAP_SERVERS #lookup :bootstrap-servers
+             ;; mTLS
+             :KAFKA_REST_CLIENT_SECURITY_PROTOCOL #lookup :client-security-protocol
+             ;; (CA <-> remote server)
+             :KAFKA_REST_CLIENT_SSL_TRUSTSTORE_LOCATION "/etc/kafka-rest/client-cas.jks"
+             :KAFKA_REST_CLIENT_SSL_TRUSTSTORE_PASSWORD "changeit"
+             ;; (cert/key <-> mTLS authentication)
+             :KAFKA_REST_CLIENT_SSL_KEYSTORE_LOCATION "/etc/ssl/localpod/tls-client-cert/keystore.jks"
+             ;:KAFKA_REST_CLIENT_SSL_KEYSTORE_PASSWORD -> :jks-password-secret-name
+             ;; Logging
+             :LOG4J_ROOTLOGGER "INFO, ConsoleJson"}
+
+          :volume-mounts {"jks-password"    {:path       "/etc/ssl/localpod/jks-password"
+                                             :read-only? true}
+                          "tls-client-cert" {:path       "/etc/ssl/localpod/tls-client-cert"
+                                             :read-only? true}
+                          "etc-kafka-rest"  {:path "/etc/kafka-rest"}}
+
+          ;; REF: https://github.com/exoscale/dockerfiles/blob/master/kafkarest/kafka-rest-docker-run
+          :command
+            ["/bin/sh" "-c"
+             #join
+              ["jks-bundle /etc/kafka-rest/client-cas.jks /config/tls-client-cas.pem"
+               " && export KAFKA_REST_CLIENT_SSL_KEYSTORE_PASSWORD=\"$(cat /etc/ssl/localpod/jks-password/password.txt)\""
+               " && /usr/bin/kafka-rest-docker-run"]]
+
+          :readiness-probe {:type    :http
+                            :port    8082
+                            :path    "/"
+                            :delay   60
+                            :period  30
+                            :timeout 2}
+
+          :liveness-probe {:type    :http
+                           :port    8082
+                           :path    "/"
+                           :delay   60
+                           :period  30
+                           :timeout 2}}}}}
